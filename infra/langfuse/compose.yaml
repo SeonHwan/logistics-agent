@@ -1,0 +1,169 @@
+# 실행: 프로젝트 루트에서 `docker compose -f infra/langfuse/compose.yaml --env-file .env up -d`
+# 공식 docker-compose.yml(official-compose.yaml에 원본 보관)을 로컬 실행에 맞게 줄인 것이다.
+#
+# 공식 파일과 다른 점:
+# - 이미지: docker.langfuse.com 대신 Docker Hub의 langfuse/*를 쓴다. minio는 레지스트리에서 받지 않고 `docker load`로 미리 가져온 이미지를 쓴다.
+# - 포트: 전부 127.0.0.1에만 연다 (공식은 web 3000, minio 9090을 0.0.0.0에 연다).
+# - 비밀값: 기본값(mysecret 등)을 두지 않는다. .env에 없으면 시작할 때 오류가 난다.
+# - 선택 설정(AI 기능, AWS, OCI, 메일 등)은 뺐다. 공식 기본값이 전부 빈 값이다.
+# - 재시작 정책: 모두 "no". unless-stopped면 WSL/Docker가 켜질 때마다 자동으로 올라와 PC 종료가 오래 걸린다. 쓸 때만 위 명령으로 켠다.
+name: langfuse
+
+x-langfuse-env: &langfuse-env
+  NEXTAUTH_URL: http://localhost:3000
+  DATABASE_URL: postgresql://postgres:${LF_POSTGRES_PASSWORD:?.env에 LF_POSTGRES_PASSWORD가 없습니다}@postgres:5432/postgres
+  SALT: ${LF_SALT:?.env에 LF_SALT가 없습니다}
+  ENCRYPTION_KEY: ${LF_ENCRYPTION_KEY:?.env에 LF_ENCRYPTION_KEY가 없습니다}
+  # 사용 통계가 외부로 나가는 설정으로 보여 끈다 (내용은 확인하지 않았다).
+  TELEMETRY_ENABLED: "false"
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${LF_CLICKHOUSE_PASSWORD:?.env에 LF_CLICKHOUSE_PASSWORD가 없습니다}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  # 이벤트·미디어·내보내기 모두 같은 minio 버킷(langfuse)을 쓴다.
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LF_MINIO_PASSWORD:?.env에 LF_MINIO_PASSWORD가 없습니다}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LF_MINIO_PASSWORD}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${LF_REDIS_PASSWORD:?.env에 LF_REDIS_PASSWORD가 없습니다}
+  REDIS_TLS_ENABLED: "false"
+
+services:
+  langfuse-worker:
+    # 버전 고정 (latest 금지). 받는 날마다 달라지면 trace를 비교할 수 없다.
+    image: langfuse/langfuse-worker:4.63.0
+    restart: "no"
+    depends_on: &langfuse-depends-on
+      postgres: {condition: service_healthy}
+      minio: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:3030:3030"
+    environment: *langfuse-env
+
+  langfuse-web:
+    image: langfuse/langfuse:4.63.0
+    restart: "no"
+    depends_on: *langfuse-depends-on
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LF_NEXTAUTH_SECRET:?.env에 LF_NEXTAUTH_SECRET가 없습니다}
+      # 브라우저가 미디어를 올리는 주소(밖)와 서버끼리 쓰는 주소(안)를 구분한다.
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
+      # 처음 기동할 때 조직, 프로젝트, 사용자, API 키를 자동으로 만든다 (화면에서 가입·키 발급을 하지 않아도 된다).
+      LANGFUSE_INIT_ORG_ID: logistics-org
+      LANGFUSE_INIT_ORG_NAME: logistics
+      LANGFUSE_INIT_PROJECT_ID: logistics-agent
+      LANGFUSE_INIT_PROJECT_NAME: logistics-agent
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?.env에 LANGFUSE_PUBLIC_KEY가 없습니다}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:?.env에 LANGFUSE_SECRET_KEY가 없습니다}
+      LANGFUSE_INIT_USER_EMAIL: ${LF_USER_EMAIL:?.env에 LF_USER_EMAIL이 없습니다}
+      LANGFUSE_INIT_USER_NAME: logistics
+      LANGFUSE_INIT_USER_PASSWORD: ${LF_USER_PASSWORD:?.env에 LF_USER_PASSWORD가 없습니다}
+
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    restart: "no"
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LF_CLICKHOUSE_PASSWORD}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  minio:
+    # 미리 `docker load`로 가져온 이미지 (minio RELEASE.2026-09-22T19-25-18Z, 이미지 ID 6e773076a10d).
+    # 레지스트리에서 받지 않으므로 다른 환경에서는 같은 이미지를 먼저 준비해야 한다.
+    image: cgr.dev/chainguard/minio:latest
+    pull_policy: never
+    restart: "no"
+    entrypoint: sh
+    # 서버를 띄우기 전에 'langfuse' 버킷 폴더를 만든다.
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${LF_MINIO_PASSWORD}
+    ports:
+      - "127.0.0.1:9090:9000"
+      - "127.0.0.1:9091:9001"
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  redis:
+    image: docker.io/redis:7
+    restart: "no"
+    command: >
+      --requirepass ${LF_REDIS_PASSWORD}
+      --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      # redis-cli에 비밀번호를 넘긴다 (공식 파일은 비밀번호를 바꾸면 이 검사가 실패할 수 있다).
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${LF_REDIS_PASSWORD}
+
+  postgres:
+    image: docker.io/postgres:17
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${LF_POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:
+  langfuse_redis_data:

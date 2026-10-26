@@ -1,0 +1,10 @@
+.env
+data/
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# 공식 Langfuse compose 원본 사본(참고용, 라이선스 미확인이라 커밋하지 않음)
+infra/langfuse/official-compose.yaml
+/docs/ROADMAP.md
